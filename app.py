@@ -331,8 +331,8 @@ with app:
             with gr.Accordion("📍 Location & Date", open=True):
                 district = gr.Textbox(
                     label="District/Location Name",
-                    placeholder="e.g., Delhi, Mumbai, Chennai",
-                    value="Delhi",
+                    placeholder="e.g., Bara, Sarlahi, Mahottari",
+                    value="Parsa",
                     info="Enter the name of the location for prediction"
                 )
                 date = gr.Textbox(
@@ -404,10 +404,10 @@ with app:
     # Example inputs
     gr.Examples(
         examples=[
-            ["Delhi", "2025-06-15", 0, 45, 30, 15, 3, 5],
-            ["Mumbai", "2025-07-20", 150, 32, 90, 8, 12, 18],
-            ["Chennai", "2025-05-10", 5, 40, 70, 10, 8, 12],
-            ["Kolkata", "2025-08-15", 200, 34, 95, 6, 15, 22],
+            ["Parsa", "2025-06-15", 0, 45, 30, 15, 3, 5],
+            ["Sarlahi", "2025-07-20", 150, 32, 90, 8, 12, 18],
+            ["Mahottari", "2025-05-10", 5, 40, 70, 10, 8, 12],
+            ["Bara", "2025-08-15", 200, 34, 95, 6, 15, 22],
         ],
         inputs=[district, date, precip, max_temp, rh, temp_range, wind_10m, wind_50m],
         label="🎯 Quick Examples - Click to load sample data"
