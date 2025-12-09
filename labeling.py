@@ -16,7 +16,7 @@ def label_heatwave(df, pct=0.95, min_run=3, temp_col='MaxTemp_2m'):
     def run_len(s):
         runs = s.astype(int).groupby((s != s.shift()).cumsum()).cumsum() * s
         return runs
-    df['heat_run'] = df.groupby('District')['heat_exceed'].apply(lambda s: run_len(s))
+    df['heat_run'] = df.groupby('District')['heat_exceed'].transform(lambda s: run_len(s))
     df['heatwave'] = df['heat_run'] >= min_run
     return df
 
