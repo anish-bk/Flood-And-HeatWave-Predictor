@@ -47,6 +47,16 @@ except ImportError:
     ML_AVAILABLE = False
     print("⚠️  ML libraries not available")
 
+# Try importing Cassandra
+try:
+    from cassandra.cluster import Cluster
+    from cassandra.query import SimpleStatement
+    import uuid
+    CASSANDRA_AVAILABLE = True
+except ImportError:
+    CASSANDRA_AVAILABLE = False
+    print("⚠️  cassandra-driver not installed. Run: pip install cassandra-driver")
+
 
 # ============================================================================
 # CONFIGURATION
@@ -72,6 +82,245 @@ MODEL_PATHS = {
     'heatwave': 'models/xgb_heatwave_model.joblib',
     'flood': 'models/xgb_flood_proxy_model.joblib'
 }
+
+# Cassandra Configuration
+CASSANDRA_CONFIG = {
+    'hosts': ['127.0.0.1'],
+    'port': 9042,
+    'keyspace': 'weather_monitoring'
+}
+
+
+# ============================================================================
+# CASSANDRA STORAGE
+# ============================================================================
+
+class CassandraStorage:
+    """Cassandra storage for weather data and predictions."""
+    
+    def __init__(self, hosts: list, port: int, keyspace: str):
+        self.hosts = hosts
+        self.port = port
+        self.keyspace = keyspace
+        self.cluster = None
+        self.session = None
+        self.connected = False
+        self.stats = {
+            'records_stored': 0,
+            'predictions_stored': 0,
+            'errors': 0
+        }
+    
+    def connect(self) -> bool:
+        """Connect to Cassandra cluster."""
+        if not CASSANDRA_AVAILABLE:
+            print("⚠️  Cassandra driver not available")
+            return False
+        
+        try:
+            self.cluster = Cluster(contact_points=self.hosts, port=self.port)
+            self.session = self.cluster.connect()
+            self.connected = True
+            print(f"✅ Connected to Cassandra at {self.hosts}:{self.port}")
+            self._setup_schema()
+            return True
+        except Exception as e:
+            print(f"⚠️  Cassandra connection failed: {e}")
+            print("   Data will not be persisted to database.")
+            self.connected = False
+            return False
+    
+    def _setup_schema(self):
+        """Create keyspace and tables if they don't exist."""
+        # Create keyspace
+        self.session.execute(f"""
+            CREATE KEYSPACE IF NOT EXISTS {self.keyspace}
+            WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': 1}}
+        """)
+        
+        self.session.set_keyspace(self.keyspace)
+        
+        # Table for weather observations
+        self.session.execute("""
+            CREATE TABLE IF NOT EXISTS weather_observations (
+                id UUID,
+                district TEXT,
+                date TEXT,
+                fetch_time TIMESTAMP,
+                max_temp DOUBLE,
+                min_temp DOUBLE,
+                temp_range DOUBLE,
+                precipitation DOUBLE,
+                humidity DOUBLE,
+                wind_speed DOUBLE,
+                pressure DOUBLE,
+                cloudiness INT,
+                visibility DOUBLE,
+                weather_desc TEXT,
+                sunrise TEXT,
+                sunset TEXT,
+                source TEXT,
+                PRIMARY KEY ((district), fetch_time, id)
+            ) WITH CLUSTERING ORDER BY (fetch_time DESC)
+        """)
+        
+        # Table for predictions
+        self.session.execute("""
+            CREATE TABLE IF NOT EXISTS weather_predictions (
+                id UUID,
+                district TEXT,
+                prediction_time TIMESTAMP,
+                max_temp DOUBLE,
+                precipitation DOUBLE,
+                humidity DOUBLE,
+                heatwave_probability DOUBLE,
+                flood_probability DOUBLE,
+                heatwave_risk TEXT,
+                flood_risk TEXT,
+                PRIMARY KEY ((district), prediction_time, id)
+            ) WITH CLUSTERING ORDER BY (prediction_time DESC)
+        """)
+        
+        # Table for daily aggregates
+        self.session.execute("""
+            CREATE TABLE IF NOT EXISTS daily_weather_summary (
+                district TEXT,
+                date TEXT,
+                record_count INT,
+                avg_temp DOUBLE,
+                max_temp DOUBLE,
+                min_temp DOUBLE,
+                total_precip DOUBLE,
+                avg_humidity DOUBLE,
+                heatwave_alerts INT,
+                flood_alerts INT,
+                PRIMARY KEY ((district), date)
+            ) WITH CLUSTERING ORDER BY (date DESC)
+        """)
+        
+        print("✅ Cassandra schema ready")
+    
+    def store_weather_data(self, data: dict) -> bool:
+        """Store weather observation in Cassandra."""
+        if not self.connected:
+            return False
+        
+        try:
+            record_id = uuid.uuid4()
+            fetch_time = datetime.fromisoformat(data.get('fetched_at', datetime.now().isoformat()))
+            
+            self.session.execute("""
+                INSERT INTO weather_observations 
+                (id, district, date, fetch_time, max_temp, min_temp, temp_range,
+                 precipitation, humidity, wind_speed, pressure, cloudiness,
+                 visibility, weather_desc, sunrise, sunset, source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                record_id,
+                data.get('District', ''),
+                data.get('Date', ''),
+                fetch_time,
+                float(data.get('MaxTemp_2m', 0)),
+                float(data.get('MinTemp_2m', 0)),
+                float(data.get('TempRange_2m', 0)),
+                float(data.get('Precip', 0)),
+                float(data.get('RH_2m', 0)),
+                float(data.get('WindSpeed_10m', 0)),
+                float(data.get('Pressure', 0)),
+                int(data.get('Cloudiness', 0)),
+                float(data.get('Visibility', 0)),
+                data.get('WeatherDesc', ''),
+                data.get('Sunrise', ''),
+                data.get('Sunset', ''),
+                data.get('source', 'openweathermap')
+            ))
+            
+            self.stats['records_stored'] += 1
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error storing weather data: {e}")
+            self.stats['errors'] += 1
+            return False
+    
+    def store_prediction(self, data: dict) -> bool:
+        """Store prediction in Cassandra."""
+        if not self.connected:
+            return False
+        
+        try:
+            record_id = uuid.uuid4()
+            prediction_time = datetime.now()
+            
+            self.session.execute("""
+                INSERT INTO weather_predictions
+                (id, district, prediction_time, max_temp, precipitation, humidity,
+                 heatwave_probability, flood_probability, heatwave_risk, flood_risk)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                record_id,
+                data.get('District', ''),
+                prediction_time,
+                float(data.get('MaxTemp_2m', 0)),
+                float(data.get('Precip', 0)),
+                float(data.get('RH_2m', 0)),
+                float(data.get('heatwave_probability', 0)),
+                float(data.get('flood_probability', 0)),
+                data.get('heatwave_risk', 'LOW'),
+                data.get('flood_risk', 'LOW')
+            ))
+            
+            self.stats['predictions_stored'] += 1
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error storing prediction: {e}")
+            self.stats['errors'] += 1
+            return False
+    
+    def get_recent_observations(self, district: str, limit: int = 20) -> list:
+        """Get recent observations for a district."""
+        if not self.connected:
+            return []
+        
+        try:
+            rows = self.session.execute("""
+                SELECT * FROM weather_observations
+                WHERE district = %s
+                LIMIT %s
+            """, (district, limit))
+            
+            return [dict(row._asdict()) for row in rows]
+        except Exception as e:
+            print(f"❌ Error fetching observations: {e}")
+            return []
+    
+    def get_recent_predictions(self, district: str, limit: int = 20) -> list:
+        """Get recent predictions for a district."""
+        if not self.connected:
+            return []
+        
+        try:
+            rows = self.session.execute("""
+                SELECT * FROM weather_predictions
+                WHERE district = %s
+                LIMIT %s
+            """, (district, limit))
+            
+            return [dict(row._asdict()) for row in rows]
+        except Exception as e:
+            print(f"❌ Error fetching predictions: {e}")
+            return []
+    
+    def get_stats(self) -> dict:
+        """Get storage statistics."""
+        return self.stats.copy()
+    
+    def close(self):
+        """Close Cassandra connection."""
+        if self.cluster:
+            self.cluster.shutdown()
+            self.connected = False
 
 
 # ============================================================================
@@ -214,8 +463,9 @@ class WeatherPredictor:
 class WeatherStreamingService:
     """Service to fetch weather data and stream via Kafka."""
     
-    def __init__(self, producer_api_url: str):
+    def __init__(self, producer_api_url: str, cassandra_storage: CassandraStorage = None):
         self.producer_api_url = producer_api_url
+        self.cassandra = cassandra_storage
         self.streaming = False
         self.current_district = None
         self.stream_thread = None
@@ -225,6 +475,7 @@ class WeatherStreamingService:
             'api_calls': 0,
             'successful': 0,
             'errors': 0,
+            'cassandra_stored': 0,
             'last_fetch_time': None
         }
         self.latest_data = None
@@ -275,6 +526,12 @@ class WeatherStreamingService:
                 self.latest_prediction = prediction
                 self.data_history.append(result)
                 
+                # Store in Cassandra
+                if self.cassandra and self.cassandra.connected:
+                    if self.cassandra.store_weather_data(result):
+                        self.stats['cassandra_stored'] += 1
+                    self.cassandra.store_prediction(result)
+                
                 return result
             else:
                 self.stats['errors'] += 1
@@ -321,7 +578,16 @@ class WeatherStreamingService:
 # GLOBAL INSTANCES
 # ============================================================================
 
-streaming_service = WeatherStreamingService(PRODUCER_API_URL)
+# Initialize Cassandra storage
+cassandra_storage = CassandraStorage(
+    hosts=CASSANDRA_CONFIG['hosts'],
+    port=CASSANDRA_CONFIG['port'],
+    keyspace=CASSANDRA_CONFIG['keyspace']
+)
+cassandra_storage.connect()
+
+# Initialize streaming service with Cassandra
+streaming_service = WeatherStreamingService(PRODUCER_API_URL, cassandra_storage)
 
 
 # ============================================================================
@@ -432,10 +698,13 @@ def create_prediction_card(data: dict) -> str:
     """
 
 
-def create_status_html(streaming: bool, district: str, stats: dict) -> str:
+def create_status_html(streaming: bool, district: str, stats: dict, cassandra_stats: dict = None) -> str:
     """Create status bar HTML."""
     status_color = "#22c55e" if streaming else "#64748b"
     status_text = f"🔴 LIVE - Streaming {district}" if streaming else "⚫ Stopped"
+    
+    cassandra_stored = stats.get('cassandra_stored', 0)
+    cassandra_status = "🟢" if cassandra_storage.connected else "🔴"
     
     return f"""
     <div style="display: flex; justify-content: space-between; align-items: center; 
@@ -446,9 +715,10 @@ def create_status_html(streaming: bool, district: str, stats: dict) -> str:
                         animation: {'pulse 1.5s infinite' if streaming else 'none'};"></div>
             <span style="color: #f1f5f9; font-weight: 600;">{status_text}</span>
         </div>
-        <div style="display: flex; gap: 25px; color: #94a3b8; font-size: 14px;">
-            <span>📡 API Calls: {stats.get('api_calls', 0)}</span>
+        <div style="display: flex; gap: 20px; color: #94a3b8; font-size: 14px;">
+            <span>📡 API: {stats.get('api_calls', 0)}</span>
             <span>✅ Success: {stats.get('successful', 0)}</span>
+            <span>{cassandra_status} Cassandra: {cassandra_stored}</span>
             <span>❌ Errors: {stats.get('errors', 0)}</span>
         </div>
     </div>
@@ -737,12 +1007,14 @@ def create_dashboard():
 # ============================================================================
 
 def main():
+    cassandra_status = "✅ Connected" if cassandra_storage.connected else "❌ Not connected"
+    
     print("""
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                                                                              ║
 ║   🌡️  REAL-TIME WEATHER & DISASTER PREDICTION DASHBOARD                      ║
 ║                                                                              ║
-║   OpenWeatherMap → Kafka → ML Prediction → Live Display                      ║
+║   OpenWeatherMap → Kafka → ML Prediction → Cassandra → Live Display          ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -750,13 +1022,27 @@ def main():
 ⏱️  Streaming Interval: {interval} seconds
 🔗 Producer API: {api_url}
 
+🗄️  Cassandra Storage:
+   Status: {cassandra_status}
+   Hosts: {cassandra_hosts}
+   Keyspace: {keyspace}
+   Tables: weather_observations, weather_predictions, daily_weather_summary
+
 🔗 Dashboard: http://localhost:7860
 
 💡 Prerequisites:
    1. Start Docker: docker-compose up -d
    2. Start Producer API: python kafka_producer_api.py
    3. Open this dashboard and select a district
-""".format(interval=STREAM_INTERVAL, api_url=PRODUCER_API_URL))
+
+📊 Data is automatically stored in Cassandra when streaming!
+""".format(
+        interval=STREAM_INTERVAL, 
+        api_url=PRODUCER_API_URL,
+        cassandra_status=cassandra_status,
+        cassandra_hosts=CASSANDRA_CONFIG['hosts'],
+        keyspace=CASSANDRA_CONFIG['keyspace']
+    ))
     
     app = create_dashboard()
     app.launch(
