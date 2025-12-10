@@ -312,6 +312,112 @@ class CassandraStorage:
             print(f"❌ Error fetching predictions: {e}")
             return []
     
+    def query_observations(self, district: str, limit: int = 50) -> list:
+        """Query observations from Cassandra for display."""
+        if not self.connected:
+            return []
+        
+        try:
+            rows = self.session.execute("""
+                SELECT district, fetch_time, date, max_temp, min_temp, temp_range,
+                       precipitation, humidity, wind_speed, pressure, cloudiness,
+                       visibility, weather_desc, source
+                FROM weather_observations
+                WHERE district = %s
+                ORDER BY fetch_time DESC
+                LIMIT %s
+            """, (district, limit))
+            
+            results = []
+            for row in rows:
+                results.append({
+                    'district': row.district,
+                    'fetch_time': row.fetch_time.strftime('%Y-%m-%d %H:%M:%S') if row.fetch_time else None,
+                    'date': row.date,
+                    'max_temp': row.max_temp,
+                    'min_temp': row.min_temp,
+                    'precipitation': row.precipitation,
+                    'humidity': row.humidity,
+                    'wind_speed': row.wind_speed,
+                    'pressure': row.pressure,
+                    'cloudiness': row.cloudiness,
+                    'weather_desc': row.weather_desc,
+                    'source': row.source
+                })
+            return results
+        except Exception as e:
+            print(f"❌ Error querying observations: {e}")
+            return []
+    
+    def query_predictions(self, district: str, limit: int = 50) -> list:
+        """Query predictions from Cassandra for display."""
+        if not self.connected:
+            return []
+        
+        try:
+            rows = self.session.execute("""
+                SELECT district, prediction_time, max_temp, precipitation, humidity,
+                       heatwave_probability, flood_probability, heatwave_risk, flood_risk
+                FROM weather_predictions
+                WHERE district = %s
+                ORDER BY prediction_time DESC
+                LIMIT %s
+            """, (district, limit))
+            
+            results = []
+            for row in rows:
+                results.append({
+                    'district': row.district,
+                    'prediction_time': row.prediction_time.strftime('%Y-%m-%d %H:%M:%S') if row.prediction_time else None,
+                    'max_temp': row.max_temp,
+                    'precipitation': row.precipitation,
+                    'humidity': row.humidity,
+                    'heatwave_prob': round(row.heatwave_probability * 100, 2) if row.heatwave_probability else 0,
+                    'flood_prob': round(row.flood_probability * 100, 2) if row.flood_probability else 0,
+                    'heatwave_risk': row.heatwave_risk,
+                    'flood_risk': row.flood_risk
+                })
+            return results
+        except Exception as e:
+            print(f"❌ Error querying predictions: {e}")
+            return []
+    
+    def get_all_stats(self) -> dict:
+        """Get statistics for all districts."""
+        if not self.connected:
+            return {}
+        
+        stats = {
+            'total_observations': 0,
+            'total_predictions': 0,
+            'by_district': {}
+        }
+        
+        for district in ['Bara', 'Dhanusa', 'Sarlahi', 'Parsa', 'Siraha']:
+            try:
+                obs_row = self.session.execute(
+                    "SELECT COUNT(*) as cnt FROM weather_observations WHERE district = %s",
+                    [district]
+                ).one()
+                pred_row = self.session.execute(
+                    "SELECT COUNT(*) as cnt FROM weather_predictions WHERE district = %s",
+                    [district]
+                ).one()
+                
+                obs_count = obs_row.cnt if obs_row else 0
+                pred_count = pred_row.cnt if pred_row else 0
+                
+                stats['by_district'][district] = {
+                    'observations': obs_count,
+                    'predictions': pred_count
+                }
+                stats['total_observations'] += obs_count
+                stats['total_predictions'] += pred_count
+            except:
+                stats['by_district'][district] = {'observations': 0, 'predictions': 0}
+        
+        return stats
+    
     def get_stats(self) -> dict:
         """Get storage statistics."""
         return self.stats.copy()
@@ -753,8 +859,186 @@ def create_history_table(history: list) -> pd.DataFrame:
 
 
 # ============================================================================
-# EVENT HANDLERS
+# CASSANDRA QUERY FUNCTIONS
 # ============================================================================
+
+def query_cassandra_observations(district: str, limit: int) -> tuple:
+    """Query observations from Cassandra."""
+    if not cassandra_storage.connected:
+        return (
+            pd.DataFrame(),
+            "❌ Cassandra not connected. Start Docker: docker-compose up -d",
+            create_cassandra_stats_html({})
+        )
+    
+    if not district:
+        return (
+            pd.DataFrame(),
+            "⚠️ Please select a district",
+            create_cassandra_stats_html(cassandra_storage.get_all_stats())
+        )
+    
+    data = cassandra_storage.query_observations(district, int(limit))
+    
+    if not data:
+        return (
+            pd.DataFrame(),
+            f"ℹ️ No observations found for {district}",
+            create_cassandra_stats_html(cassandra_storage.get_all_stats())
+        )
+    
+    df = pd.DataFrame(data)
+    # Rename columns for better display
+    df.columns = ['District', 'Timestamp', 'Date', 'Max Temp', 'Min Temp', 
+                  'Precip', 'Humidity', 'Wind', 'Pressure', 'Clouds', 'Weather', 'Source']
+    
+    return (
+        df,
+        f"✅ Found {len(data)} observations for {district}",
+        create_cassandra_stats_html(cassandra_storage.get_all_stats())
+    )
+
+
+def query_cassandra_predictions(district: str, limit: int) -> tuple:
+    """Query predictions from Cassandra."""
+    if not cassandra_storage.connected:
+        return (
+            pd.DataFrame(),
+            "❌ Cassandra not connected. Start Docker: docker-compose up -d",
+            create_cassandra_stats_html({})
+        )
+    
+    if not district:
+        return (
+            pd.DataFrame(),
+            "⚠️ Please select a district",
+            create_cassandra_stats_html(cassandra_storage.get_all_stats())
+        )
+    
+    data = cassandra_storage.query_predictions(district, int(limit))
+    
+    if not data:
+        return (
+            pd.DataFrame(),
+            f"ℹ️ No predictions found for {district}",
+            create_cassandra_stats_html(cassandra_storage.get_all_stats())
+        )
+    
+    df = pd.DataFrame(data)
+    df.columns = ['District', 'Timestamp', 'Max Temp', 'Precip', 'Humidity',
+                  'Heatwave %', 'Flood %', 'Heatwave Risk', 'Flood Risk']
+    
+    return (
+        df,
+        f"✅ Found {len(data)} predictions for {district}",
+        create_cassandra_stats_html(cassandra_storage.get_all_stats())
+    )
+
+
+def query_all_districts(data_type: str, limit: int) -> tuple:
+    """Query data for all districts."""
+    if not cassandra_storage.connected:
+        return (
+            pd.DataFrame(),
+            "❌ Cassandra not connected",
+            create_cassandra_stats_html({})
+        )
+    
+    all_data = []
+    for district in DISTRICTS:
+        if data_type == "Observations":
+            data = cassandra_storage.query_observations(district, int(limit) // 5)
+        else:
+            data = cassandra_storage.query_predictions(district, int(limit) // 5)
+        all_data.extend(data)
+    
+    if not all_data:
+        return (
+            pd.DataFrame(),
+            f"ℹ️ No {data_type.lower()} found",
+            create_cassandra_stats_html(cassandra_storage.get_all_stats())
+        )
+    
+    df = pd.DataFrame(all_data)
+    
+    # Sort by timestamp
+    time_col = 'fetch_time' if data_type == "Observations" else 'prediction_time'
+    if time_col in df.columns:
+        df = df.sort_values(time_col, ascending=False)
+    
+    return (
+        df,
+        f"✅ Found {len(all_data)} {data_type.lower()} across all districts",
+        create_cassandra_stats_html(cassandra_storage.get_all_stats())
+    )
+
+
+def refresh_cassandra_stats() -> str:
+    """Refresh Cassandra statistics."""
+    return create_cassandra_stats_html(cassandra_storage.get_all_stats())
+
+
+def create_cassandra_stats_html(stats: dict) -> str:
+    """Create HTML for Cassandra statistics."""
+    if not stats or not cassandra_storage.connected:
+        return """
+        <div style="background: linear-gradient(135deg, #1e293b, #334155); padding: 20px; border-radius: 16px; border: 1px solid #475569;">
+            <div style="text-align: center; color: #ef4444;">
+                <div style="font-size: 36px;">🔴</div>
+                <div style="font-size: 16px; margin-top: 10px;">Cassandra Not Connected</div>
+                <div style="font-size: 12px; color: #64748b; margin-top: 5px;">Run: docker-compose up -d</div>
+            </div>
+        </div>
+        """
+    
+    total_obs = stats.get('total_observations', 0)
+    total_pred = stats.get('total_predictions', 0)
+    by_district = stats.get('by_district', {})
+    
+    district_rows = ""
+    for district, counts in by_district.items():
+        obs = counts.get('observations', 0)
+        pred = counts.get('predictions', 0)
+        bar_width = min(obs * 2, 100)
+        district_rows += f"""
+        <div style="display: flex; align-items: center; margin: 8px 0; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 8px;">
+            <div style="width: 80px; color: #94a3b8; font-weight: 500;">{district}</div>
+            <div style="flex: 1; margin: 0 10px;">
+                <div style="background: #3b82f6; height: 8px; width: {bar_width}%; border-radius: 4px;"></div>
+            </div>
+            <div style="width: 60px; text-align: right; color: #22c55e;">{obs}</div>
+            <div style="width: 60px; text-align: right; color: #f59e0b;">{pred}</div>
+        </div>
+        """
+    
+    return f"""
+    <div style="background: linear-gradient(135deg, #1e293b, #334155); padding: 20px; border-radius: 16px; border: 1px solid #475569;">
+        <div style="text-align: center; margin-bottom: 15px;">
+            <div style="font-size: 18px; color: #f1f5f9; font-weight: 600;">🗄️ Cassandra Database Stats</div>
+            <div style="color: #22c55e; font-size: 14px; margin-top: 5px;">🟢 Connected</div>
+        </div>
+        
+        <div style="display: flex; justify-content: center; gap: 30px; margin: 20px 0; padding: 15px; background: rgba(0,0,0,0.2); border-radius: 12px;">
+            <div style="text-align: center;">
+                <div style="font-size: 28px; color: #3b82f6; font-weight: bold;">{total_obs}</div>
+                <div style="color: #94a3b8; font-size: 12px;">Observations</div>
+            </div>
+            <div style="text-align: center;">
+                <div style="font-size: 28px; color: #f59e0b; font-weight: bold;">{total_pred}</div>
+                <div style="color: #94a3b8; font-size: 12px;">Predictions</div>
+            </div>
+        </div>
+        
+        <div style="font-size: 12px; color: #64748b; margin-bottom: 10px;">
+            <div style="display: flex; justify-content: flex-end; gap: 10px;">
+                <span style="color: #22c55e;">📊 Obs</span>
+                <span style="color: #f59e0b;">🔮 Pred</span>
+            </div>
+        </div>
+        
+        {district_rows}
+    </div>
+    """
 
 def fetch_once(district: str):
     """Fetch weather once for selected district."""
@@ -883,93 +1167,208 @@ def create_dashboard():
             🌡️ Real-Time Weather & Disaster Prediction 🌊
         </div>
         <div class="subtitle">
-            OpenWeatherMap → Kafka Streaming → ML Prediction → Live Dashboard
+            OpenWeatherMap → Kafka Streaming → ML Prediction → Cassandra Storage → Live Dashboard
         </div>
         """)
         
-        # Status bar
-        status_html = gr.HTML(value=create_status_html(False, None, {}))
-        
-        # District Selection & Controls
-        with gr.Row():
-            with gr.Column(scale=2):
-                district_dropdown = gr.Dropdown(
-                    choices=DISTRICTS,
-                    label="📍 Select District",
-                    value=None,
-                    info="Choose a district to monitor",
-                    interactive=True
+        # Main tabs
+        with gr.Tabs():
+            # =====================================================================
+            # TAB 1: LIVE STREAMING
+            # =====================================================================
+            with gr.TabItem("📡 Live Streaming", id="live"):
+                # Status bar
+                status_html = gr.HTML(value=create_status_html(False, None, {}))
+                
+                # District Selection & Controls
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        district_dropdown = gr.Dropdown(
+                            choices=DISTRICTS,
+                            label="📍 Select District",
+                            value=None,
+                            info="Choose a district to monitor",
+                            interactive=True
+                        )
+                    with gr.Column(scale=1):
+                        fetch_btn = gr.Button("🔍 Fetch Once", variant="secondary", size="lg")
+                    with gr.Column(scale=1):
+                        start_btn = gr.Button("▶️ Start Streaming", variant="primary", size="lg")
+                    with gr.Column(scale=1):
+                        stop_btn = gr.Button("⏹️ Stop", variant="stop", size="lg")
+                
+                # Status message
+                status_msg = gr.Textbox(
+                    label="Status", 
+                    value="👆 Select a district and click 'Fetch Once' or 'Start Streaming'",
+                    interactive=False
                 )
-            with gr.Column(scale=1):
-                fetch_btn = gr.Button("🔍 Fetch Once", variant="secondary", size="lg")
-            with gr.Column(scale=1):
-                start_btn = gr.Button("▶️ Start Streaming", variant="primary", size="lg")
-            with gr.Column(scale=1):
-                stop_btn = gr.Button("⏹️ Stop", variant="stop", size="lg")
+                
+                # Main content
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.HTML('<div class="section-header">🌤️ Current Weather</div>')
+                        weather_card = gr.HTML(value=create_weather_card(None))
+                    
+                    with gr.Column(scale=1):
+                        gr.HTML('<div class="section-header">🔮 Risk Predictions</div>')
+                        prediction_card = gr.HTML(value=create_prediction_card(None))
+                
+                # History table
+                gr.HTML('<div class="section-header">📊 Recent Data History (Session)</div>')
+                history_table = gr.Dataframe(
+                    value=create_history_table([]),
+                    interactive=False,
+                    wrap=True
+                )
+                
+                # Auto-refresh timer (every 5 seconds to update UI)
+                timer = gr.Timer(value=5)
+            
+            # =====================================================================
+            # TAB 2: CASSANDRA HISTORICAL DATA
+            # =====================================================================
+            with gr.TabItem("🗄️ Historical Data (Cassandra)", id="cassandra"):
+                gr.HTML("""
+                <div style="background: linear-gradient(135deg, #1e293b, #334155); padding: 15px; border-radius: 12px; margin-bottom: 20px;">
+                    <div style="color: #f1f5f9; font-size: 16px;">
+                        📊 <b>Query Historical Weather Data</b> - Browse weather observations and predictions stored in Cassandra
+                    </div>
+                    <div style="color: #94a3b8; font-size: 13px; margin-top: 5px;">
+                        💡 Data is continuously collected by the background streamer from all districts
+                    </div>
+                </div>
+                """)
+                
+                with gr.Row():
+                    # Query controls column
+                    with gr.Column(scale=1):
+                        gr.HTML('<div class="section-header">🔍 Query Controls</div>')
+                        
+                        query_district = gr.Dropdown(
+                            choices=["All Districts"] + DISTRICTS,
+                            label="📍 Select District",
+                            value="All Districts",
+                            interactive=True
+                        )
+                        
+                        query_type = gr.Radio(
+                            choices=["Observations", "Predictions"],
+                            label="📋 Data Type",
+                            value="Observations",
+                            interactive=True
+                        )
+                        
+                        query_limit = gr.Slider(
+                            minimum=10,
+                            maximum=200,
+                            value=50,
+                            step=10,
+                            label="📊 Number of Records",
+                            interactive=True
+                        )
+                        
+                        with gr.Row():
+                            query_btn = gr.Button("🔍 Query Data", variant="primary", size="lg")
+                            refresh_stats_btn = gr.Button("🔄 Refresh Stats", variant="secondary", size="lg")
+                        
+                        query_status = gr.Textbox(
+                            label="Query Status",
+                            value="👆 Select options and click 'Query Data'",
+                            interactive=False
+                        )
+                        
+                        # Cassandra stats panel
+                        cassandra_stats_html = gr.HTML(
+                            value=create_cassandra_stats_html(cassandra_storage.get_all_stats() if cassandra_storage.connected else {})
+                        )
+                    
+                    # Results column
+                    with gr.Column(scale=2):
+                        gr.HTML('<div class="section-header">📊 Query Results</div>')
+                        
+                        query_results = gr.Dataframe(
+                            value=pd.DataFrame(),
+                            label="Results",
+                            interactive=False,
+                            wrap=True
+                        )
+            
+            # =====================================================================
+            # TAB 3: INFO
+            # =====================================================================
+            with gr.TabItem("ℹ️ About", id="about"):
+                gr.Markdown(f"""
+                ## 🌡️ Weather Prediction Dashboard
+                
+                This dashboard monitors weather conditions for districts in Nepal's Terai region and predicts disaster risks.
+                
+                ### 📍 Monitored Districts
+                - **Bara** - Southern plains district
+                - **Dhanusa** - Terai district bordering India  
+                - **Sarlahi** - Agricultural district
+                - **Parsa** - Contains Parsa Wildlife Reserve
+                - **Siraha** - Eastern Terai district
+                
+                ### 🔄 Data Flow Architecture
+                ```
+                ┌─────────────────────────────────────────────────────────────┐
+                │              BACKGROUND STREAMER (Distributed)              │
+                │  Continuously fetches data for all 5 districts every 30s    │
+                └────────────────────────────┬────────────────────────────────┘
+                                             │
+                                             ▼
+                        ┌─────────────────────────────────────┐
+                        │     OpenWeatherMap API (5 calls)     │
+                        └────────────────────────────┬────────┘
+                                                     │
+                                                     ▼
+                ┌─────────────────┐         ┌─────────────────┐
+                │   Kafka Topic   │◄────────│  Producer API   │
+                │  (weather-data) │         │   (port 8000)   │
+                └────────┬────────┘         └─────────────────┘
+                         │
+                         ▼
+                ┌─────────────────┐         ┌─────────────────┐
+                │   Cassandra DB  │◄────────│  ML Predictions │
+                │  (time-series)  │         │  (XGBoost)      │
+                └────────┬────────┘         └─────────────────┘
+                         │
+                         ▼
+                ┌─────────────────────────────────────────────┐
+                │            This Dashboard (Gradio)           │
+                │  - Live streaming tab (real-time)            │
+                │  - Historical data tab (query Cassandra)     │
+                └─────────────────────────────────────────────┘
+                ```
+                
+                ### 📡 Live Streaming Tab
+                - Select a district and click **"Start Streaming"** to auto-fetch weather every **{STREAM_INTERVAL} seconds**
+                - Click **"Fetch Once"** for a single data point
+                - View real-time heatwave and flood risk predictions
+                
+                ### 🗄️ Historical Data Tab
+                - Query observations and predictions stored in Cassandra
+                - View data from all districts or filter by specific district
+                - Data is continuously collected by the background streamer
+                
+                ### 🚀 Components to Run
+                1. **Docker**: `docker-compose up -d` (Kafka, Cassandra, Zookeeper)
+                2. **Background Streamer**: `python background_streamer.py` (collects data)
+                3. **Producer API**: `python kafka_producer_api.py` (optional, for manual triggers)
+                4. **This Dashboard**: `python weather_dashboard.py`
+                
+                ### 🔮 ML Predictions
+                - **Heatwave Risk**: Based on temperature thresholds (>35°C moderate, >40°C high)
+                - **Flood Risk**: Based on precipitation and humidity levels
+                - Models: XGBoost classifiers trained on historical Nepal weather data
+                """)
         
-        # Status message
-        status_msg = gr.Textbox(
-            label="Status", 
-            value="👆 Select a district and click 'Fetch Once' or 'Start Streaming'",
-            interactive=False
-        )
+        # =====================================================================
+        # EVENT HANDLERS
+        # =====================================================================
         
-        # Main content
-        with gr.Row():
-            with gr.Column(scale=1):
-                gr.HTML('<div class="section-header">🌤️ Current Weather</div>')
-                weather_card = gr.HTML(value=create_weather_card(None))
-            
-            with gr.Column(scale=1):
-                gr.HTML('<div class="section-header">🔮 Risk Predictions</div>')
-                prediction_card = gr.HTML(value=create_prediction_card(None))
-        
-        # History table
-        gr.HTML('<div class="section-header">📊 Recent Data History</div>')
-        history_table = gr.Dataframe(
-            value=create_history_table([]),
-            interactive=False,
-            wrap=True
-        )
-        
-        # Auto-refresh timer (every 5 seconds to update UI)
-        timer = gr.Timer(value=5)
-        
-        # Info accordion
-        with gr.Accordion("ℹ️ About This Dashboard", open=False):
-            gr.Markdown(f"""
-            ## 🌡️ Weather Prediction Dashboard
-            
-            This dashboard monitors weather conditions for districts in Nepal's Terai region and predicts disaster risks.
-            
-            ### 📍 Monitored Districts
-            - **Bara** - Southern plains district
-            - **Dhanusa** - Terai district bordering India  
-            - **Sarlahi** - Agricultural district
-            - **Parsa** - Contains Parsa Wildlife Reserve
-            - **Siraha** - Eastern Terai district
-            
-            ### 🔄 Data Flow
-            ```
-            OpenWeatherMap API → Producer API (port 8000) → Kafka → This Dashboard
-            ```
-            
-            ### ⏱️ Streaming
-            - Click **"Start Streaming"** to auto-fetch weather every **{STREAM_INTERVAL} seconds**
-            - Click **"Fetch Once"** for a single data point
-            - Click **"Stop"** to stop auto-streaming
-            
-            ### 🔮 Predictions
-            - **Heatwave Risk**: Based on temperature thresholds (>35°C moderate, >40°C high)
-            - **Flood Risk**: Based on precipitation and humidity levels
-            
-            ### 🚀 Prerequisites
-            1. Start Docker: `docker-compose up -d`
-            2. Start Producer API: `python kafka_producer_api.py`
-            3. Ensure OpenWeatherMap API key is set
-            """)
-        
-        # Event handlers
+        # Live streaming handlers
         fetch_btn.click(
             fn=fetch_once,
             inputs=[district_dropdown],
@@ -992,11 +1391,31 @@ def create_dashboard():
             outputs=[weather_card, prediction_card, status_html, history_table]
         )
         
-        # On district change, fetch immediately
         district_dropdown.change(
             fn=fetch_once,
             inputs=[district_dropdown],
             outputs=[weather_card, prediction_card, status_html, history_table, status_msg]
+        )
+        
+        # Cassandra query handlers
+        def handle_query(district, data_type, limit):
+            if district == "All Districts":
+                return query_all_districts(data_type, limit)
+            else:
+                if data_type == "Observations":
+                    return query_cassandra_observations(district, limit)
+                else:
+                    return query_cassandra_predictions(district, limit)
+        
+        query_btn.click(
+            fn=handle_query,
+            inputs=[query_district, query_type, query_limit],
+            outputs=[query_results, query_status, cassandra_stats_html]
+        )
+        
+        refresh_stats_btn.click(
+            fn=refresh_cassandra_stats,
+            outputs=[cassandra_stats_html]
         )
     
     return app
