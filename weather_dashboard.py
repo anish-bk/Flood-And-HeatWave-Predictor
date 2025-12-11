@@ -1,15 +1,26 @@
 """
 Real-Time Weather Prediction Dashboard
-Fetches weather from OpenWeatherMap → Streams via Kafka → ML Prediction → Display
+Reads weather data from Cassandra (populated by Spark ETL) → ML Prediction → Display
+
+Architecture:
+    OpenWeatherMap → Spark ETL Pipeline → Cassandra → Dashboard
 
 Features:
 - District selection (Bara, Dhanusa, Sarlahi, Parsa, Siraha)
-- Auto-streaming every 30 seconds from OpenWeatherMap
+- Auto-refresh every 30 seconds from Cassandra (Spark ETL data)
 - Real-time heatwave and flood predictions
-- Cassandra storage for historical data
+- Historical data queries from Cassandra
 
-Usage:
-    1. Start Kafka: docker-compose up -d
+Usage (Recommended - Big Data Pipeline):
+    1. Start Docker: docker-compose up -d
+    2. Start Spark ETL: python spark_etl_pipeline.py --mode stream --interval 10
+    3. Run this dashboard: python weather_dashboard.py
+    
+    Dashboard reads from Cassandra (populated by Spark ETL).
+    No need for kafka_producer_api.py!
+
+Fallback Mode (if Spark ETL not running):
+    1. Start Docker: docker-compose up -d
     2. Start Producer API: python kafka_producer_api.py
     3. Run this dashboard: python weather_dashboard.py
 """
@@ -199,6 +210,59 @@ class CassandraStorage:
         """)
         
         print("✅ Cassandra schema ready")
+    
+    def get_latest_spark_data(self, district: str) -> dict:
+        """Get the latest data from weather_transformed table (populated by Spark ETL)."""
+        if not self.connected:
+            return None
+        
+        try:
+            # Try weather_transformed table first (Spark ETL output)
+            row = self.session.execute("""
+                SELECT district, fetch_time, temp, temp_min, temp_max, humidity, 
+                       pressure, wind_speed, clouds, rain_1h, visibility_km,
+                       heat_index, heatwave_indicator, flood_indicator
+                FROM weather_transformed
+                WHERE district = %s
+                LIMIT 1
+            """, (district,)).one()
+            
+            if row:
+                return {
+                    'District': row.district,
+                    'Date': row.fetch_time.strftime('%Y-%m-%d') if row.fetch_time else '',
+                    'fetched_at': row.fetch_time.isoformat() if row.fetch_time else '',
+                    'MaxTemp_2m': row.temp_max or row.temp,
+                    'MinTemp_2m': row.temp_min,
+                    'TempRange_2m': (row.temp_max or 0) - (row.temp_min or 0),
+                    'Precip': row.rain_1h or 0,
+                    'RH_2m': row.humidity,
+                    'WindSpeed_10m': row.wind_speed,
+                    'Pressure': row.pressure,
+                    'Cloudiness': row.clouds,
+                    'Visibility': row.visibility_km,
+                    'HeatIndex': row.heat_index,
+                    'heatwave_probability': row.heatwave_indicator or 0,
+                    'flood_probability': row.flood_indicator or 0,
+                    'heatwave_risk': 'HIGH' if (row.heatwave_indicator or 0) > 0.5 else 'MEDIUM' if (row.heatwave_indicator or 0) > 0.3 else 'LOW',
+                    'flood_risk': 'HIGH' if (row.flood_indicator or 0) > 0.5 else 'MEDIUM' if (row.flood_indicator or 0) > 0.3 else 'LOW',
+                    'source': 'spark_etl',
+                    'WeatherDesc': 'From Spark ETL'
+                }
+        except Exception as e:
+            # Table might not exist yet
+            pass
+        
+        return None
+    
+    def get_all_latest_spark_data(self) -> list:
+        """Get latest data for all districts from Spark ETL."""
+        results = []
+        for district in ['Bara', 'Dhanusa', 'Sarlahi', 'Parsa', 'Siraha']:
+            data = self.get_latest_spark_data(district)
+            if data:
+                results.append(data)
+        return results
     
     def store_weather_data(self, data: dict) -> bool:
         """Store weather observation in Cassandra."""
@@ -567,7 +631,7 @@ class WeatherPredictor:
 # ============================================================================
 
 class WeatherStreamingService:
-    """Service to fetch weather data and stream via Kafka."""
+    """Service to fetch weather data - supports both Spark ETL (Cassandra) and direct API modes."""
     
     def __init__(self, producer_api_url: str, cassandra_storage: CassandraStorage = None):
         self.producer_api_url = producer_api_url
@@ -577,18 +641,46 @@ class WeatherStreamingService:
         self.stream_thread = None
         self.data_history = deque(maxlen=50)
         self.predictor = WeatherPredictor()
+        self.use_spark_etl = True  # Prefer Spark ETL data from Cassandra
         self.stats = {
             'api_calls': 0,
             'successful': 0,
             'errors': 0,
             'cassandra_stored': 0,
-            'last_fetch_time': None
+            'cassandra_reads': 0,
+            'last_fetch_time': None,
+            'data_source': 'spark_etl'
         }
         self.latest_data = None
         self.latest_prediction = None
     
     def fetch_weather(self, district: str) -> dict:
-        """Fetch weather for a district from OpenWeatherMap via Producer API."""
+        """Fetch weather for a district - tries Cassandra (Spark ETL) first, falls back to API."""
+        
+        # Try Cassandra first (data from Spark ETL)
+        if self.use_spark_etl and self.cassandra and self.cassandra.connected:
+            spark_data = self.cassandra.get_latest_spark_data(district)
+            if spark_data:
+                self.stats['cassandra_reads'] += 1
+                self.stats['successful'] += 1
+                self.stats['last_fetch_time'] = datetime.now().isoformat()
+                self.stats['data_source'] = 'spark_etl'
+                
+                self.latest_data = spark_data
+                self.latest_prediction = {
+                    'heatwave_probability': spark_data.get('heatwave_probability', 0),
+                    'flood_probability': spark_data.get('flood_probability', 0),
+                    'heatwave_risk': spark_data.get('heatwave_risk', 'LOW'),
+                    'flood_risk': spark_data.get('flood_risk', 'LOW')
+                }
+                self.data_history.append(spark_data)
+                return spark_data
+        
+        # Fallback to Producer API
+        return self._fetch_from_api(district)
+    
+    def _fetch_from_api(self, district: str) -> dict:
+        """Fetch weather from Producer API (fallback mode)."""
         try:
             # Call the producer API which fetches from OpenWeatherMap
             url = f"{self.producer_api_url}/weather/city/{district}"
@@ -599,6 +691,7 @@ class WeatherStreamingService:
                 data = response.json()
                 self.stats['successful'] += 1
                 self.stats['last_fetch_time'] = datetime.now().isoformat()
+                self.stats['data_source'] = 'producer_api'
                 
                 # Extract weather data
                 weather = data.get('weather', {})
@@ -810,7 +903,11 @@ def create_status_html(streaming: bool, district: str, stats: dict, cassandra_st
     status_text = f"🔴 LIVE - Streaming {district}" if streaming else "⚫ Stopped"
     
     cassandra_stored = stats.get('cassandra_stored', 0)
+    cassandra_reads = stats.get('cassandra_reads', 0)
     cassandra_status = "🟢" if cassandra_storage.connected else "🔴"
+    data_source = stats.get('data_source', 'unknown')
+    source_icon = "⚡" if data_source == 'spark_etl' else "🌐"
+    source_label = "Spark ETL" if data_source == 'spark_etl' else "API"
     
     return f"""
     <div style="display: flex; justify-content: space-between; align-items: center; 
@@ -822,9 +919,10 @@ def create_status_html(streaming: bool, district: str, stats: dict, cassandra_st
             <span style="color: #f1f5f9; font-weight: 600;">{status_text}</span>
         </div>
         <div style="display: flex; gap: 20px; color: #94a3b8; font-size: 14px;">
+            <span>{source_icon} Source: {source_label}</span>
             <span>📡 API: {stats.get('api_calls', 0)}</span>
-            <span>✅ Success: {stats.get('successful', 0)}</span>
-            <span>{cassandra_status} Cassandra: {cassandra_stored}</span>
+            <span>🗄️ Reads: {cassandra_reads}</span>
+            <span>{cassandra_status} Cassandra</span>
             <span>❌ Errors: {stats.get('errors', 0)}</span>
         </div>
     </div>
