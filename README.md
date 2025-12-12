@@ -281,10 +281,6 @@ pip install -r requirements.txt
 - If you see `NoBrokersAvailable` from Kafka, ensure Kafka & Zookeeper are up (`docker-compose ps`) and retry the producer/consumer.
 - Background streamer requires a valid `OPENWEATHERMAP_API_KEY` environment variable.
 
-If you'd like, I can also:
-- Push a small example of how to visualize historical trends (plots) in the dashboard
-- Add Docker Compose health-check automation to ensure Cassandra/Kafka restart on failures
-
 ---
 
 ## License
