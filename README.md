@@ -1,22 +1,60 @@
 # Heatwave & Flood Prediction Pipeline
 
-This repo provides a complete pipeline (separate Python scripts) to: ingest data, label heatwave and flood proxy targets, engineer features, train XGBoost baseline, optionally train an LSTM sequence model, evaluate and produce reports.
+A Big Data pipeline implementing **Lambda Architecture** for real-time weather monitoring and disaster risk prediction using Apache Kafka, Hadoop HDFS, Spark, and Cassandra.
 
-# Heatwave & Flood Prediction Pipeline
+## Architecture (Lambda Architecture)
 
-A complete pipeline and demo for real-time weather monitoring and disaster risk prediction. The system demonstrates:
-- Data ingestion & feature engineering
-- XGBoost and optional LSTM training
-- Real-time streaming (OpenWeatherMap → Kafka → ML → Cassandra)
-- Gradio dashboard with Live and Historical (Cassandra) views
+![Lambda Architecture](images/LambdaPipeline.png)
 
-This repository is intended as a demonstration of a Big Data streaming + ML pipeline for monitoring districts in Nepal's Terai region.
+### Component Roles (Lambda Architecture)
+
+| Layer | Component | Role | Why Required |
+|-------|-----------|------|--------------|
+| **Ingestion** | **Kafka** | Message queue / buffer | Decouples producers from consumers, handles backpressure, enables replay |
+| **Processing** | **Spark** | Distributed stream/batch processing | Scalable ETL, complex transformations, feature engineering |
+| **Batch Layer** | **HDFS** | Distributed file system (Data Lake) | Stores raw data for batch reprocessing, immutable master dataset |
+| **Speed Layer** | **Cassandra** | Distributed time-series storage | Low-latency queries, real-time views |
+| **Serving** | **Dashboard** | Visualization | Merges batch and speed layer views |
+
+### Why HDFS + Cassandra (Lambda)?
+
+- **HDFS (Batch Layer)**: Stores ALL raw data for historical analysis and recomputation
+- **Cassandra (Speed Layer)**: Provides real-time views with low latency
+- **Combined**: Accuracy from batch + Speed from real-time = Best of both worlds
+
+## Features
+- **Lambda Architecture**: Batch + Speed layers for robust data processing
+- **Kafka Ingestion**: Real-time message streaming with fault tolerance
+- **HDFS Data Lake**: Persistent raw data storage for batch reprocessing
+- **Spark Streaming**: Distributed stream processing from Kafka → HDFS + Cassandra
+- **Spark Batch**: Reprocess historical data from HDFS → Cassandra
+- **ML Predictions**: XGBoost models for heatwave and flood risk
+- **Real-time Dashboard**: Gradio app reading from Cassandra
+- **Cassandra Storage**: Time-series data persistence
 
 ---
 
-## Quick Start (Windows PowerShell)
+## Prediction Examples
 
-1. Create and activate a virtual environment, then install dependencies:
+### Weather Dashboard - Live Predictions
+
+![Weather Dashboard](images/127.0.0.1_7860_.png)
+
+### Cassandra Data View
+
+![Cassandra Data](images/127.0.0.1_7860_cassandra.png)
+
+### Heatwave & Flood Risk Predictions
+
+![Prediction Example 1](images/localhost_7862_.png)
+
+![Prediction Example 2](images/localhost_7862_1.png)
+
+---
+
+## Quick Start (Full Lambda Architecture)
+
+### 1. Setup Environment
 
 ```powershell
 python -m venv venv
@@ -24,39 +62,92 @@ python -m venv venv
 pip install -r requirements.txt
 ```
 
-2. Set your OpenWeatherMap API key (required for streaming):
+### 2. Set OpenWeatherMap API Key
 
 ```powershell
 setx OPENWEATHERMAP_API_KEY "your_api_key_here"
-# Restart PowerShell to load environment variable into current session
+# Restart PowerShell after this
 ```
 
-3. Start infrastructure (Docker Compose includes Kafka, Zookeeper, Cassandra, Kafka-UI):
+### 3. Start Infrastructure (HDFS + Kafka + Cassandra)
 
 ```powershell
 docker-compose up -d
+
+# Wait for HDFS NameNode to be ready (~30 seconds)
+# Check: http://localhost:9870 (HDFS NameNode UI)
 ```
 
-4. Start continuous background streaming (collects OpenWeatherMap for all districts and writes to Cassandra):
+### 4. Start Kafka Producer (Terminal 1)
 
 ```powershell
-python background_streamer.py --interval 30
-```
-
-5. (Optional) Start the producer API (manual fetch/publish endpoints):
-
-```powershell
+# Fetches weather from OpenWeatherMap → Publishes to Kafka
 python kafka_producer_api.py
 ```
 
-6. Start the Gradio dashboard (Live + Historical tabs):
+### 5. Start Spark Streaming Consumer (Terminal 2)
+
+```powershell
+# Consumes from Kafka → Writes to HDFS (batch) + Cassandra (speed)
+python spark_etl_pipeline.py --mode stream-kafka --interval 10
+```
+
+### 6. Send Weather Data to Kafka (Terminal 3)
+
+```powershell
+# Trigger weather fetch for all Nepal districts
+Invoke-RestMethod -Uri "http://localhost:8000/weather/nepal" -Method GET
+```
+
+### 7. Start Dashboard (Terminal 4)
 
 ```powershell
 python weather_dashboard.py
 # Open http://localhost:7860
 ```
 
-7. Query Cassandra directly with the provided CLI tool:
+---
+
+## HDFS Data Lake Operations
+
+### Check HDFS Status
+
+```powershell
+# List all data in HDFS
+python spark_etl_pipeline.py --mode list-hdfs
+```
+
+### Batch Reprocessing (Lambda Batch Layer)
+
+```powershell
+# Reprocess historical data from HDFS → Cassandra
+python spark_etl_pipeline.py --mode batch-hdfs
+```
+
+### Web UIs
+
+| Service | URL | Description |
+|---------|-----|-------------|
+| **HDFS NameNode** | http://localhost:9870 | File system browser, cluster status |
+| **HDFS DataNode** | http://localhost:9864 | DataNode metrics |
+| **Kafka UI** | http://localhost:8080 | Topic browser, messages |
+| **Dashboard** | http://localhost:7860 | Weather monitoring |
+| **Kafka Producer API** | http://localhost:8000/docs | OpenAPI documentation |
+
+---
+
+## Alternative: Direct Mode (No Kafka)
+
+If you want to skip Kafka for simpler setup:
+
+```powershell
+# Direct: API → Spark → Cassandra
+python spark_etl_pipeline.py --mode stream --interval 10
+```
+
+---
+
+## Optional: Query Cassandra CLI
 
 ```powershell
 # Show stats
@@ -73,12 +164,13 @@ python cassandra_query.py export --district Bara --output bara_weather.csv
 
 ## Files of Interest
 
-- `background_streamer.py` — Background streamer that fetches OpenWeatherMap for all monitored districts in parallel and stores observations + predictions in Cassandra. Use this for continuous ingestion.
-- `kafka_producer_api.py` — FastAPI producer that can fetch weather for a city and publish to Kafka (also used by the dashboard for single fetches).
-- `weather_dashboard.py` — Gradio dashboard with two main tabs:
-	- Live Streaming: real-time fetch + ML predictions
-	- Historical Data (Cassandra): query observations & predictions stored in Cassandra
+- `kafka_producer_api.py` — FastAPI producer that fetches weather from OpenWeatherMap and publishes to Kafka topic 'weather-data'.
+- `spark_etl_pipeline.py` — Spark Structured Streaming consumer that reads from Kafka, transforms data, and writes to Cassandra.
+- `weather_dashboard.py` — Gradio dashboard that reads processed data from Cassandra.
+	- Live Streaming: Shows latest data from Cassandra (populated by Spark)
+	- Historical Data: Query historical observations and predictions
 - `cassandra_query.py` — CLI tool for ad-hoc queries, stats, and export from Cassandra.
+- `spark_etl_pipeline.py` — Apache Spark-based ETL pipeline for batch processing weather data.
 - `train_xgb.py`, `train_lstm.py`, `evaluate.py` — model training and evaluation scripts.
 
 ---
@@ -91,6 +183,55 @@ The dashboard and background streamer create and use the keyspace `weather_monit
 - `daily_weather_summary` — aggregate daily stats
 
 If you ever lose the keyspace, re-run the dashboard or the background streamer to re-create schema.
+
+---
+
+## Spark ETL Pipeline
+
+The `spark_etl_pipeline.py` provides Apache Spark-based Extract, Transform, Load (ETL) for batch processing:
+
+### ETL Stages
+
+1. **Extract**: Fetch weather data from OpenWeatherMap API for all monitored districts
+2. **Transform**: PySpark transformations including:
+   - Data cleaning & type casting
+   - Temporal feature extraction (hour, day, month, season)
+   - Derived metrics (temp range, pressure deviation, wind chill, heat index)
+   - Risk indicator calculations (heat risk, flood risk scores)
+   - Aggregations (hourly, daily summaries, alerts)
+3. **Load**: Write transformed data to Cassandra or local files (CSV/Parquet)
+
+### Usage
+
+```powershell
+# Run full ETL pipeline (extract → transform → load)
+python spark_etl_pipeline.py --mode all
+
+# Extract only (fetch from API)
+python spark_etl_pipeline.py --mode extract
+
+# Transform only (process existing data)
+python spark_etl_pipeline.py --mode transform
+
+# Load only (write to Cassandra)
+python spark_etl_pipeline.py --mode load
+
+# Continuous streaming ETL (runs every N minutes)
+python spark_etl_pipeline.py --mode stream --interval 5
+```
+
+### Spark Session Configuration
+
+The pipeline auto-configures Spark with:
+- Cassandra connector (spark.jars.packages)
+- Memory settings (2GB driver, 1GB executor)
+- Cassandra connection (localhost:9042)
+
+### Output Tables (Cassandra)
+
+- `weather_transformed` — Transformed weather observations with derived features
+- `weather_daily_summary` — Daily aggregated statistics per district
+- `weather_alerts` — Generated alerts for high-risk conditions
 
 ---
 
@@ -122,6 +263,7 @@ Key Python packages are listed in `requirements.txt`. Important ones used by the
 - `cassandra-driver` — Cassandra client
 - `kafka-python` — Kafka client (producer/consumer)
 - `requests` — HTTP requests to OpenWeatherMap and producer API
+- `pyspark` — Apache Spark for ETL processing
 - `xgboost`, `joblib` — ML models
 - `pandas`, `numpy` — Data handling
 
